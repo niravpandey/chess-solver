@@ -1,5 +1,20 @@
 import type { Metadata } from "next";
+import {
+  Source_Sans_3,
+  JetBrains_Mono,
+} from "next/font/google";
+
 import "./globals.css";
+
+const sourceSans = Source_Sans_3({
+  subsets: ["latin"],
+  variable: "--font-source-sans",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+});
 
 export const metadata: Metadata = {
   title: "Chess Solver",
@@ -13,7 +28,14 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body
+        className={`
+          ${sourceSans.className}
+          ${jetbrainsMono.variable}
+        `}
+      >
+        {children}
+      </body>
     </html>
   );
 }
