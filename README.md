@@ -15,7 +15,7 @@ docker rm chess-backend
 
 docker run -d \
     --name chess-backend \
-    --restart unless-stopped \ 
+    --restart unless-stopped \
     -p 8000:8000 \
     chess-backend
 ```
