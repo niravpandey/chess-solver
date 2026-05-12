@@ -37,7 +37,7 @@ export default async function Home() {
 
           <div className=" bg-neutral-900 p-4 shadow-xl border border-neutral-800">
             <h2 className="mb-3 text-xl font-semibold">
-              Agent's Moves
+              Agent&apos;s Moves
             </h2>
 
             <pre className="overflow-auto  bg-neutral-950 p-4 text-sm text-neutral-300 border border-neutral-800">
