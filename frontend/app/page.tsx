@@ -20,33 +20,7 @@ export default function Home() {
           </p>
         </div>
 
-        <div className="grid gap-8 md:grid-cols-[auto_1fr] items-start">
-          <div className=" bg-neutral-900 p-4 shadow-xl border border-neutral-800">
-            <Board apiUrl={API_URL} />
-          </div>
-
-          <div className=" bg-neutral-900 p-4 shadow-xl border border-neutral-800">
-            <h2 className="mb-3 text-xl font-semibold">
-              Match
-            </h2>
-
-            <p className="mt-2">
-              Current mode: two humans.
-            </p> 
-            <label className="mt-4 grid gap-1 text-sm text-neutral-300">
-              Opponent
-              <select
-                defaultValue="human"
-                className="border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100"
-              >
-                <option value="human">Human</option>
-              </select>
-            </label>
-            <p className="mt-2">
-              Agent modes will attach to the same move API once minimax is ready.
-            </p> 
-          </div>
-        </div>
+        <Board apiUrl={API_URL} />
       </section>
     </main>
   );

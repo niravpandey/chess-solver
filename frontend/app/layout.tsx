@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import {
   Source_Sans_3,
   JetBrains_Mono,
@@ -35,6 +36,24 @@ export default function RootLayout({
         `}
       >
         {children}
+        <Script id="mathjax-config" strategy="beforeInteractive">
+          {`
+            window.MathJax = {
+              tex: {
+                inlineMath: [['\\\\(', '\\\\)']],
+                displayMath: [['\\\\[', '\\\\]']]
+              },
+              svg: {
+                fontCache: 'global'
+              }
+            };
+          `}
+        </Script>
+        <Script
+          id="mathjax"
+          src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"
+          strategy="afterInteractive"
+        />
       </body>
     </html>
   );

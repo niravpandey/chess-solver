@@ -70,6 +70,7 @@ export default function Square({
             <FontAwesomeIcon
               icon={pieceIcons[piece.type]}
               className={`
+                  block size-14 overflow-visible
                   ${piece.color === "white"
                   ? "text-white"
                   : "text-black"}
