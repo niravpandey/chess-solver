@@ -91,6 +91,17 @@ async function postJson<T>(
   return response.json();
 }
 
+async function getJson<T>(apiUrl: string, path: string): Promise<T> {
+  const response = await fetch(`${apiUrl}${path}`);
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail ?? "Request failed");
+  }
+
+  return response.json();
+}
+
 export default function Board({ apiUrl }: BoardProps) {
   const [game, setGame] = useState<GameState>({
     fen: STARTING_FEN,
@@ -102,8 +113,6 @@ export default function Board({ apiUrl }: BoardProps) {
   });
   const [activeSquare, setActiveSquare] = useState<string | null>(null);
   const [legalMoves, setLegalMoves] = useState<LegalMove[]>([]);
-  const [opponent, setOpponent] = useState("human");
-  const [status, setStatus] = useState("White to move");
 
   const board = useMemo(() => boardFromFen(game.fen), [game.fen]);
   const legalTargets = useMemo(
@@ -112,10 +121,9 @@ export default function Board({ apiUrl }: BoardProps) {
   );
 
   useEffect(() => {
-    fetch(`${apiUrl}/game/new`)
-      .then((response) => response.json())
-      .then((nextGame: GameState) => setGame(nextGame))
-      .catch(() => setStatus("Backend unavailable"));
+    getJson<GameState>(apiUrl, "/game/new")
+      .then((nextGame) => setGame(nextGame))
+      .catch(() => undefined);
   }, [apiUrl]);
 
   async function selectSquare(square: string, piece: Piece | null) {
@@ -129,15 +137,8 @@ export default function Board({ apiUrl }: BoardProps) {
         setGame(nextGame);
         setActiveSquare(null);
         setLegalMoves([]);
-        setStatus(
-          nextGame.is_checkmate
-            ? `Checkmate after ${nextGame.move?.san}`
-            : nextGame.is_stalemate
-              ? "Stalemate"
-              : `${nextGame.turn === "white" ? "White" : "Black"} to move`,
-        );
       } catch (error) {
-        setStatus(error instanceof Error ? error.message : "Illegal move");
+        console.error(error);
       }
       return;
     }
@@ -159,61 +160,35 @@ export default function Board({ apiUrl }: BoardProps) {
       );
       setActiveSquare(square);
       setLegalMoves(response.moves);
-      setStatus(
-        response.moves.length
-          ? `${piece.color === "white" ? "White" : "Black"} ${piece.type}: ${response.moves.length} legal moves`
-          : "No legal moves",
-      );
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Move lookup failed");
+      console.error(error);
     }
   }
 
   return (
-    <div className="grid gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm uppercase tracking-wide text-neutral-400">
-            {opponent === "human" ? "Two humans" : "Agent"}
-          </p>
-          <p className="text-lg font-semibold text-neutral-100">{status}</p>
+    <div className="inline-block border-2 border-black">
+      {board.map((row, rowIndex) => (
+        <div key={rowIndex} className="flex">
+          {row.map((piece, colIndex) => {
+            const square = squareName(rowIndex, colIndex);
+            const color =
+              (rowIndex + colIndex) % 2 === 0
+                ? "white"
+                : "black";
+
+            return (
+              <Square
+                key={square}
+                color={color}
+                piece={piece}
+                isActive={activeSquare === square}
+                isLegalMove={legalTargets.has(square)}
+                onClick={() => selectSquare(square, piece)}
+              />
+            );
+          })}
         </div>
-        <label className="grid gap-1 text-sm text-neutral-300">
-          Opponent
-          <select
-            value={opponent}
-            onChange={(event) => setOpponent(event.target.value)}
-            className="border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100"
-          >
-            <option value="human">Human</option>
-          </select>
-        </label>
-      </div>
-
-      <div className="inline-block border-2 border-black">
-        {board.map((row, rowIndex) => (
-          <div key={rowIndex} className="flex">
-            {row.map((piece, colIndex) => {
-              const square = squareName(rowIndex, colIndex);
-              const color =
-                (rowIndex + colIndex) % 2 === 0
-                  ? "white"
-                  : "black";
-
-              return (
-                <Square
-                  key={square}
-                  color={color}
-                  piece={piece}
-                  isActive={activeSquare === square}
-                  isLegalMove={legalTargets.has(square)}
-                  onClick={() => selectSquare(square, piece)}
-                />
-              );
-            })}
-          </div>
-        ))}
-      </div>
+      ))}
     </div>
   );
 }

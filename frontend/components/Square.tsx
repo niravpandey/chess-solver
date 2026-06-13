@@ -34,36 +34,42 @@ export default function Square({
   onClick,
 }: SquareProps) {
   return (
-    <button
-        type="button"
+    <div
+        role="button"
+        tabIndex={0}
         onClick={onClick}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onClick?.();
+          }
+        }}
         className={`
             w-16 h-16
             relative
             flex items-center justify-center
             select-none
-            transition
-            focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-inset
+            cursor-pointer
+            focus:outline-none focus:ring-2 focus:ring-neutral-300/60 focus:ring-inset
             ${color === "black"
             ? "bg-slate-700"
             : "bg-slate-400"}
-            ${isActive ? "ring-4 ring-amber-300 ring-inset" : ""}
+            ${isActive ? "ring-4 ring-neutral-200/70 ring-inset" : ""}
         `}
         >
         {isLegalMove && (
           <span
             className={`
               absolute rounded-full
-              ${piece ? "inset-1 border-4 border-emerald-300" : "h-4 w-4 bg-emerald-300"}
+              ${piece ? "inset-1 border-4 border-neutral-200/70" : "h-4 w-4 bg-neutral-950/45"}
             `}
           />
         )}
         {piece && (
-          <span className="relative z-10 grid h-full w-full place-items-center overflow-visible leading-none">
+          <span className="relative z-10 ">
             <FontAwesomeIcon
               icon={pieceIcons[piece.type]}
               className={`
-                  block size-7 translate-y-0.5 overflow-visible
                   ${piece.color === "white"
                   ? "text-white"
                   : "text-black"}
@@ -71,6 +77,6 @@ export default function Square({
             />
           </span>
         )}
-    </button>
+    </div>
   );
 }

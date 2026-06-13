@@ -33,6 +33,15 @@ export default function Home() {
             <p className="mt-2">
               Current mode: two humans.
             </p> 
+            <label className="mt-4 grid gap-1 text-sm text-neutral-300">
+              Opponent
+              <select
+                defaultValue="human"
+                className="border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100"
+              >
+                <option value="human">Human</option>
+              </select>
+            </label>
             <p className="mt-2">
               Agent modes will attach to the same move API once minimax is ready.
             </p> 
