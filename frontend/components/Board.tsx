@@ -1,17 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ReferenceLine,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AgentControlsPanel from "./AgentControlsPanel";
+import AgentStatsTable from "./AgentStatsTable";
+import GameSidePanel from "./GameSidePanel";
 import Square from "./Square";
-import { Piece, PieceColor, PieceType } from "./Piece";
+import { Piece, PieceType } from "./Piece";
+import { useChessSessionPersistence } from "@/hooks/useChessSessionPersistence";
+import {
+  type ChessMoveRecord,
+  type ChessResult,
+  type HeuristicConfig,
+} from "@/lib/chessSessions";
+import {
+  EvalPoint,
+  GameState,
+  GameTotals,
+  LegalMove,
+  Opponent,
+  SearchStats,
+} from "./boardTypes";
 
 const STARTING_FEN =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -25,84 +33,9 @@ const pieceTypes: Record<string, PieceType> = {
   r: "rook",
 };
 
-type LegalMove = {
-  uci: string;
-  from_square: string;
-  to_square: string;
-  promotion: string | null;
-};
-
-type GameState = {
-  fen: string;
-  turn: PieceColor;
-  is_check: boolean;
-  is_checkmate: boolean;
-  is_stalemate: boolean;
-  legal_move_count: number;
-  move?: {
-    uci: string;
-    san: string;
-    from_square: string;
-    to_square: string;
-    promotion?: string | null;
-  };
-  agent?: {
-    type: string;
-    color: PieceColor;
-    score: number;
-    search_depth: number;
-    mobility_weight: number;
-    piece_weight: number;
-    material_weight: number;
-    center_weight: number;
-    root_branching_factor: number;
-    average_branching_factor: number;
-    nodes_generated: number;
-    expanded_nodes: number;
-  };
-};
-
-type SearchStats = {
-  turn: PieceColor;
-  search_depth: number;
-  mobility_weight: number;
-  piece_weight: number;
-  root_branching_factor: number;
-  average_branching_factor: number;
-  nodes_generated: number;
-  expanded_nodes: number;
-  nodes_by_ply: number[];
-  heuristics: {
-    agent: HeuristicEval;
-    human: HeuristicEval;
-  };
-};
-
-type HeuristicEval = {
-  color: PieceColor;
-  h1_mobility: number;
-  h2_piece_count: number;
-  h3_material: number;
-  h4_center_control: number;
-  score: number;
-};
-
-type EvalPoint = {
-  ply: number;
-  advantage: number;
-};
-
 type BoardProps = {
   apiUrl: string;
 };
-
-declare global {
-  interface Window {
-    MathJax?: {
-      typesetPromise?: () => Promise<void>;
-    };
-  }
-}
 
 function squareName(rowIndex: number, colIndex: number) {
   return `${String.fromCharCode(97 + colIndex)}${8 - rowIndex}`;
@@ -119,22 +52,24 @@ function gamePlyFromFen(fen: string) {
   return (moveNumber - 1) * 2 + (turn === "b" ? 1 : 0);
 }
 
-function formatNumber(value: number) {
-  if (Number.isInteger(value)) {
-    return String(value);
-  }
-
-  return value.toFixed(3).replace(/\.?0+$/, "");
+function moveNumberFromPly(ply: number) {
+  return Math.floor(ply / 2) + 1;
 }
 
-function signedWeightTerm(weight: number, heuristicName: string) {
-  const magnitude = formatNumber(Math.abs(weight));
-  return weight < 0
-    ? `- ${magnitude}${heuristicName}(s)`
-    : `+ ${magnitude}${heuristicName}(s)`;
+function formatOutcomeReason(reason: string) {
+  return reason.replaceAll("_", " ");
 }
 
 function gameStatus(game: GameState, lastMove?: string) {
+  if (game.outcome) {
+    if (game.outcome.winner) {
+      const winner = game.outcome.winner === "white" ? "White" : "Black";
+      return `${winner} wins by ${formatOutcomeReason(game.outcome.reason)}${lastMove ? ` after ${lastMove}` : ""}.`;
+    }
+
+    return `Draw by ${formatOutcomeReason(game.outcome.reason)}.`;
+  }
+
   if (game.is_checkmate) {
     const winner = game.turn === "white" ? "Black" : "White";
     return `Checkmate. ${winner} wins${lastMove ? ` after ${lastMove}` : ""}.`;
@@ -144,7 +79,43 @@ function gameStatus(game: GameState, lastMove?: string) {
     return "Stalemate. Draw.";
   }
 
-  return `${game.turn === "white" ? "White" : "Black"} to move`;
+  const player = game.turn === "white" ? "White" : "Black";
+  return game.is_check ? `${player} to move in check` : `${player} to move`;
+}
+
+function resultForGame(game: GameState): {
+  result: ChessResult;
+  reason: string;
+} | null {
+  if (game.outcome) {
+    if (!game.outcome.winner) {
+      return {
+        result: "draw",
+        reason: game.outcome.reason,
+      };
+    }
+
+    return {
+      result: game.outcome.winner === "white" ? "human_win" : "agent_win",
+      reason: game.outcome.reason,
+    };
+  }
+
+  if (game.is_checkmate) {
+    return {
+      result: game.turn === "white" ? "agent_win" : "human_win",
+      reason: "checkmate",
+    };
+  }
+
+  if (game.is_stalemate) {
+    return {
+      result: "draw",
+      reason: "stalemate",
+    };
+  }
+
+  return null;
 }
 
 function boardFromFen(fen: string): (Piece | null)[][] {
@@ -210,56 +181,63 @@ export default function Board({ apiUrl }: BoardProps) {
     is_check: false,
     is_checkmate: false,
     is_stalemate: false,
+    is_game_over: false,
+    outcome: null,
     legal_move_count: 20,
   });
   const [activeSquare, setActiveSquare] = useState<string | null>(null);
   const [legalMoves, setLegalMoves] = useState<LegalMove[]>([]);
-  const [opponent, setOpponent] = useState<"human" | "minimax">("minimax");
+  const [opponent, setOpponent] = useState<Opponent>("minimax");
   const [searchDepth, setSearchDepth] = useState(1);
   const [mobilityWeight, setMobilityWeight] = useState(1);
   const [pieceWeight, setPieceWeight] = useState(1);
   const [materialWeight, setMaterialWeight] = useState(1);
   const [centerWeight, setCenterWeight] = useState(1);
   const [isAgentThinking, setIsAgentThinking] = useState(false);
-  const [status, setStatus] = useState("White to move");
-  const [previewStats, setPreviewStats] = useState<SearchStats | null>(null);
+  const [status, setStatus] = useState("Click Start Game to play");
   const [evalHistory, setEvalHistory] = useState<EvalPoint[]>([]);
-  const [gameTotals, setGameTotals] = useState({
+  const [gameTotals, setGameTotals] = useState<GameTotals>({
     agentMoves: 0,
     nodesGenerated: 0,
     nodesExpanded: 0,
   });
   const failedAgentFen = useRef<string | null>(null);
+  const {
+    isStartingGame,
+    sessionId,
+    persistedMoveCount,
+    startSession,
+    persistMove,
+    persistAgentAnalysis,
+    completeSession,
+    completeSessionOnUnload,
+  } = useChessSessionPersistence();
 
   const board = useMemo(() => boardFromFen(game.fen), [game.fen]);
   const legalTargets = useMemo(
     () => new Set(legalMoves.map((move) => move.to_square)),
     [legalMoves],
   );
-  const activeSearchDepth = opponent === "minimax" ? searchDepth : 0;
   const gamePly = useMemo(() => gamePlyFromFen(game.fen), [game.fen]);
-
-  useEffect(() => {
-    window.MathJax?.typesetPromise?.();
-  }, [
-    game.agent,
-    game.legal_move_count,
-    gamePly,
-    centerWeight,
-    mobilityWeight,
-    materialWeight,
-    opponent,
-    pieceWeight,
-    previewStats,
-    evalHistory,
-    activeSearchDepth,
-  ]);
+  const heuristicConfig = useMemo<HeuristicConfig>(
+    () => ({
+      version: "v1",
+      weights: {
+        material: materialWeight,
+        mobility: mobilityWeight,
+        center_control: centerWeight,
+        king_safety: 1,
+        piece_count: pieceWeight,
+      },
+    }),
+    [centerWeight, materialWeight, mobilityWeight, pieceWeight],
+  );
 
   useEffect(() => {
     getJson<GameState>(apiUrl, "/game/new")
       .then((nextGame) => {
         setGame(nextGame);
-        setStatus("White to move");
+        setStatus("Click Start Game to play");
         setEvalHistory([]);
         setGameTotals({
           agentMoves: 0,
@@ -270,8 +248,114 @@ export default function Board({ apiUrl }: BoardProps) {
       .catch(() => setStatus("Backend unavailable"));
   }, [apiUrl]);
 
+  const completeSessionForGameResult = useCallback(
+    (
+      nextGame: GameState,
+      nextMoveCount: number,
+      finalEval: number | null,
+    ) => {
+      const result = resultForGame(nextGame);
+
+      if (!result) {
+        return;
+      }
+
+      completeSession({
+        result: result.result,
+        result_reason: result.reason,
+        move_count: nextMoveCount,
+        final_fen: nextGame.fen,
+        final_eval: finalEval,
+      });
+    },
+    [completeSession],
+  );
+
+  const resignSummary = useCallback(
+    () => ({
+      result: "agent_win" as const,
+      result_reason: "resignation",
+      move_count: persistedMoveCount,
+      final_fen: game.fen,
+      final_eval: evalHistory.at(-1)?.advantage ?? null,
+    }),
+    [evalHistory, game.fen, persistedMoveCount],
+  );
+
+  function resignGame() {
+    if (!sessionId || game.is_game_over) {
+      return;
+    }
+
+    const summary = resignSummary();
+    completeSession(summary);
+    setActiveSquare(null);
+    setLegalMoves([]);
+    setGame((current) => ({
+      ...current,
+      is_game_over: true,
+      outcome: {
+        winner: "black",
+        result: "0-1",
+        reason: "resignation",
+      },
+      legal_move_count: 0,
+    }));
+    setStatus("You resigned. Black wins by resignation.");
+  }
+
   useEffect(() => {
-    if (opponent !== "minimax" || game.is_checkmate || game.is_stalemate) {
+    if (!sessionId || game.is_game_over) {
+      return;
+    }
+
+    const resignOnExit = () => {
+      completeSessionOnUnload(resignSummary());
+    };
+
+    window.addEventListener("pagehide", resignOnExit);
+    window.addEventListener("beforeunload", resignOnExit);
+
+    return () => {
+      window.removeEventListener("pagehide", resignOnExit);
+      window.removeEventListener("beforeunload", resignOnExit);
+    };
+  }, [completeSessionOnUnload, game.is_game_over, resignSummary, sessionId]);
+
+  async function startGame() {
+    setActiveSquare(null);
+    setLegalMoves([]);
+
+    try {
+      await startSession({
+        heuristicConfig,
+        opponent,
+        searchDepth,
+        loadNewGame: () => getJson<GameState>(apiUrl, "/game/new"),
+        onGameStarted: (nextGame) => {
+          setGame(nextGame);
+          setEvalHistory([]);
+          setGameTotals({
+            agentMoves: 0,
+            nodesGenerated: 0,
+            nodesExpanded: 0,
+          });
+          failedAgentFen.current = null;
+          setStatus(gameStatus(nextGame));
+        },
+      });
+    } catch (error) {
+      console.error(error);
+      setStatus("Start Game failed");
+    }
+  }
+
+  useEffect(() => {
+    if (
+      !sessionId ||
+      opponent !== "minimax" ||
+      game.is_game_over
+    ) {
       return;
     }
 
@@ -300,7 +384,6 @@ export default function Board({ apiUrl }: BoardProps) {
           return response.json() as Promise<SearchStats>;
         })
         .then((stats) => {
-          setPreviewStats(stats);
           if (!stats.heuristics) {
             return;
           }
@@ -325,7 +408,6 @@ export default function Board({ apiUrl }: BoardProps) {
           }
 
           console.error(error);
-          setPreviewStats(null);
         });
     }, 150);
 
@@ -338,21 +420,21 @@ export default function Board({ apiUrl }: BoardProps) {
     centerWeight,
     game.fen,
     gamePly,
-    game.is_checkmate,
-    game.is_stalemate,
+    game.is_game_over,
     mobilityWeight,
     materialWeight,
     opponent,
     pieceWeight,
     searchDepth,
+    sessionId,
   ]);
 
   useEffect(() => {
     if (
       opponent !== "minimax" ||
+      !sessionId ||
       game.turn !== "black" ||
-      game.is_checkmate ||
-      game.is_stalemate ||
+      game.is_game_over ||
       isAgentThinking ||
       failedAgentFen.current === game.fen
     ) {
@@ -363,9 +445,13 @@ export default function Board({ apiUrl }: BoardProps) {
     setActiveSquare(null);
     setLegalMoves([]);
     setStatus("Agent is thinking");
+    const fenBefore = game.fen;
+    const plyBefore = gamePly;
+    const evalBefore = evalHistory.at(-1)?.advantage ?? null;
+    const searchStartedAt = Date.now();
 
     postJson<GameState>(apiUrl, "/agent/minimax", {
-      fen: game.fen,
+      fen: fenBefore,
       search_depth: searchDepth,
       mobility_weight: mobilityWeight,
       piece_weight: pieceWeight,
@@ -374,8 +460,62 @@ export default function Board({ apiUrl }: BoardProps) {
     })
       .then((nextGame) => {
         failedAgentFen.current = null;
+        const searchTimeMs = Date.now() - searchStartedAt;
+        const agentEval =
+          nextGame.agent?.color === "black"
+            ? -(nextGame.agent?.score ?? 0)
+            : (nextGame.agent?.score ?? null);
+        const moveData: ChessMoveRecord = {
+          ply_number: plyBefore + 1,
+          move_number: moveNumberFromPly(plyBefore),
+          actor: "agent",
+          fen_before: fenBefore,
+          fen_after: nextGame.fen,
+          move_uci: nextGame.move?.uci ?? "",
+          move_san: nextGame.move?.san ?? "",
+          legal_moves_count: game.legal_move_count,
+          eval_before: evalBefore,
+          eval_after: agentEval,
+          eval_delta:
+            evalBefore !== null && agentEval !== null
+              ? agentEval - evalBefore
+              : null,
+          move_time_ms: searchTimeMs,
+          created_at: new Date().toISOString(),
+        };
+        const nextMoveCount = persistedMoveCount + 1;
         setGame(nextGame);
         if (nextGame.agent) {
+          const nodesPerSecond =
+            searchTimeMs > 0
+              ? Math.round(
+                  (nextGame.agent.nodes_generated / searchTimeMs) * 1000,
+                )
+              : null;
+
+          persistAgentAnalysis({
+            ply_number: plyBefore + 1,
+            move_number: moveNumberFromPly(plyBefore),
+            search_depth_reached: nextGame.agent.search_depth,
+            nodes_generated: nextGame.agent.nodes_generated,
+            nodes_evaluated: nextGame.agent.expanded_nodes,
+            branches_pruned: 0,
+            pruning_rate: 0,
+            search_time_ms: searchTimeMs,
+            nodes_per_second: nodesPerSecond,
+            selected_move: nextGame.move?.uci ?? "",
+            selected_eval: nextGame.agent.score,
+            principal_variation: nextGame.move?.uci ? [nextGame.move.uci] : [],
+            top_candidates: [],
+            heuristic_breakdown: {
+              material: 0,
+              mobility: 0,
+              center_control: 0,
+              king_safety: 0,
+              total: nextGame.agent.score,
+            },
+            created_at: new Date().toISOString(),
+          });
           setGameTotals((current) => ({
             agentMoves: current.agentMoves + 1,
             nodesGenerated:
@@ -384,8 +524,15 @@ export default function Board({ apiUrl }: BoardProps) {
               current.nodesExpanded + nextGame.agent!.expanded_nodes,
           }));
         }
+        if (resultForGame(nextGame)) {
+          void persistMove(moveData).finally(() =>
+            completeSessionForGameResult(nextGame, nextMoveCount, agentEval),
+          );
+        } else {
+          void persistMove(moveData);
+        }
         setStatus(
-          nextGame.is_checkmate || nextGame.is_stalemate
+          nextGame.is_game_over
             ? gameStatus(nextGame, nextGame.move?.san)
             : `Agent played ${nextGame.move?.san ?? ""}`.trim(),
         );
@@ -403,20 +550,32 @@ export default function Board({ apiUrl }: BoardProps) {
   }, [
     apiUrl,
     centerWeight,
+    completeSessionForGameResult,
     game.fen,
-    game.is_checkmate,
-    game.is_stalemate,
+    game.is_game_over,
     game.turn,
+    game.legal_move_count,
+    gamePly,
     isAgentThinking,
+    evalHistory,
     mobilityWeight,
     materialWeight,
     opponent,
+    persistAgentAnalysis,
+    persistMove,
     pieceWeight,
+    persistedMoveCount,
     searchDepth,
+    sessionId,
   ]);
 
   async function selectSquare(square: string, piece: Piece | null) {
-    if (game.is_checkmate || game.is_stalemate) {
+    if (!sessionId) {
+      setStatus("Click Start Game to play");
+      return;
+    }
+
+    if (game.is_game_over) {
       setStatus(gameStatus(game));
       return;
     }
@@ -426,15 +585,46 @@ export default function Board({ apiUrl }: BoardProps) {
     }
 
     if (activeSquare && legalTargets.has(square)) {
+      const fenBefore = game.fen;
+      const plyBefore = gamePly;
+      const evalBefore = evalHistory.at(-1)?.advantage ?? null;
+
       try {
         const nextGame = await postJson<GameState>(apiUrl, "/game/move", {
-          fen: game.fen,
+          fen: fenBefore,
           from_square: activeSquare,
           to_square: square,
         });
+        const evalAfter = evalHistory.at(-1)?.advantage ?? null;
+        const moveData: ChessMoveRecord = {
+          ply_number: plyBefore + 1,
+          move_number: moveNumberFromPly(plyBefore),
+          actor: "human",
+          fen_before: fenBefore,
+          fen_after: nextGame.fen,
+          move_uci: nextGame.move?.uci ?? `${activeSquare}${square}`,
+          move_san: nextGame.move?.san ?? `${activeSquare}-${square}`,
+          legal_moves_count: game.legal_move_count,
+          eval_before: evalBefore,
+          eval_after: evalAfter,
+          eval_delta:
+            evalBefore !== null && evalAfter !== null
+              ? evalAfter - evalBefore
+              : null,
+          move_time_ms: null,
+          created_at: new Date().toISOString(),
+        };
+        const nextMoveCount = persistedMoveCount + 1;
         setGame(nextGame);
         setActiveSquare(null);
         setLegalMoves([]);
+        if (resultForGame(nextGame)) {
+          void persistMove(moveData).finally(() =>
+            completeSessionForGameResult(nextGame, nextMoveCount, evalAfter),
+          );
+        } else {
+          void persistMove(moveData);
+        }
         setStatus(gameStatus(nextGame, nextGame.move?.san));
       } catch (error) {
         console.error(error);
@@ -471,289 +661,78 @@ export default function Board({ apiUrl }: BoardProps) {
     }
   }
 
-  const lastSearchStats = game.agent
-    ? {
-        root_branching_factor: game.agent.root_branching_factor,
-        average_branching_factor: game.agent.average_branching_factor,
-        nodes_generated: game.agent.nodes_generated,
-        expanded_nodes: game.agent.expanded_nodes,
-      }
-    : null;
-  const heuristicFormula = `\\[
-    h(s)=${formatNumber(mobilityWeight)}h_1(s) ${signedWeightTerm(pieceWeight, "h_2")} ${signedWeightTerm(materialWeight, "h_3")} ${signedWeightTerm(centerWeight, "h_4")}
-  \\]`;
-  const currentAdvantage = evalHistory.at(-1)?.advantage ?? 0;
-  const advantageLabel =
-    currentAdvantage > 0
-      ? `Human +${formatNumber(currentAdvantage)}`
-      : currentAdvantage < 0
-        ? `Agent +${formatNumber(Math.abs(currentAdvantage))}`
-        : "Equal";
-
   return (
-    <div className="grid gap-8 md:grid-cols-[auto_1fr] items-start">
-      <div className="bg-neutral-900 shadow-xl border border-neutral-800">
-        <div className="inline-block border-2 border-black">
-          {board.map((row, rowIndex) => (
-            <div key={rowIndex} className="flex">
-              {row.map((piece, colIndex) => {
-                const square = squareName(rowIndex, colIndex);
-                const color =
-                  (rowIndex + colIndex) % 2 === 0
-                    ? "white"
-                    : "black";
+    <div className="w-fit">
+      <div className="flex flex-col items-start gap-3 xl:flex-row">
+        <div className="shrink-0 bg-neutral-900 shadow-xl border border-neutral-800">
+          <div className="inline-block border-2 border-black">
+            {board.map((row, rowIndex) => (
+              <div key={rowIndex} className="flex">
+                {row.map((piece, colIndex) => {
+                  const square = squareName(rowIndex, colIndex);
+                  const color =
+                    (rowIndex + colIndex) % 2 === 0
+                      ? "white"
+                      : "black";
 
-                return (
-                  <Square
-                    key={square}
-                    color={color}
-                    piece={piece}
-                    isActive={activeSquare === square}
-                    isLegalMove={legalTargets.has(square)}
-                    onClick={() => selectSquare(square, piece)}
-                  />
-                );
-              })}
-            </div>
-          ))}
+                  return (
+                    <Square
+                      key={square}
+                      color={color}
+                      piece={piece}
+                      isActive={activeSquare === square}
+                      isLegalMove={legalTargets.has(square)}
+                      onClick={() => selectSquare(square, piece)}
+                    />
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex w-full flex-col gap-3 sm:flex-row xl:w-auto">
+          <div className="w-full sm:w-80">
+            <GameSidePanel
+              game={game}
+              status={status}
+              isAgentThinking={isAgentThinking}
+              isStartingGame={isStartingGame}
+              hasSession={Boolean(sessionId)}
+              settingsLocked={Boolean(sessionId)}
+              sessionId={sessionId}
+              onStartGame={startGame}
+              onResignGame={resignGame}
+              opponent={opponent}
+              setOpponent={setOpponent}
+              evalHistory={evalHistory}
+            />
+          </div>
+          <div className="w-full sm:w-72">
+            <AgentStatsTable />
+          </div>
         </div>
       </div>
 
-      <div className="bg-neutral-900 p-4 shadow-xl border border-neutral-800">
-        <h2 className="mb-3 text-xl font-semibold">Match</h2>
-        <div className="flex min-h-6 items-center gap-2 text-neutral-300">
-          {isAgentThinking && (
-            <span className="h-4 w-4 rounded-full border-2 border-neutral-500 border-t-neutral-100 animate-spin" />
-          )}
-          <span>{status}</span>
-        </div>
+      <h1>Control how the agent works!</h1>
 
-        <label className="mt-4 grid gap-1 text-sm text-neutral-300">
-          Opponent
-          <select
-            value={opponent}
-            onChange={(event) =>
-              setOpponent(event.target.value as "human" | "minimax")
-            }
-            className="border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100"
-          >
-            <option value="human">Human</option>
-            <option value="minimax">Minimax</option>
-          </select>
-        </label>
-
-        <div className="mt-5 border-t border-neutral-800 pt-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-neutral-100">
-              Advantage
-            </p>
-            <p className="font-mono text-sm text-neutral-300">
-              {advantageLabel}
-            </p>
-          </div>
-          <p className="mt-1 text-xs text-neutral-500">
-            Positive means human/white is ahead; negative means agent/black is ahead.
-          </p>
-          <div className="mt-3 overflow-x-auto">
-            {evalHistory.length > 0 ? (
-              <LineChart
-                width={360}
-                height={180}
-                data={evalHistory}
-                margin={{ top: 8, right: 12, left: -12, bottom: 0 }}
-              >
-                <CartesianGrid stroke="#262626" />
-                <XAxis
-                  dataKey="ply"
-                  stroke="#a3a3a3"
-                  tick={{ fill: "#a3a3a3", fontSize: 12 }}
-                />
-                <YAxis
-                  stroke="#a3a3a3"
-                  tick={{ fill: "#a3a3a3", fontSize: 12 }}
-                />
-                <Tooltip
-                  contentStyle={{
-                    background: "#0a0a0a",
-                    border: "1px solid #404040",
-                    color: "#e5e5e5",
-                  }}
-                />
-                <ReferenceLine y={0} stroke="#525252" strokeDasharray="4 4" />
-                <Line
-                  type="monotone"
-                  dataKey="advantage"
-                  name="Human advantage"
-                  stroke="#e5e5e5"
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              </LineChart>
-            ) : (
-              <div className="grid h-44 place-items-center border border-neutral-800 text-sm text-neutral-500">
-                Select minimax to start plotting evaluations.
-              </div>
-            )}
-          </div>
-        </div>
-
-        {game.agent && (
-          <p className="mt-4 text-sm text-neutral-400">
-            Last agent score: {game.agent.score.toFixed(2)}
-          </p>
-        )}
-
-        <details className="mt-5 border-t border-neutral-800 pt-4 text-sm text-neutral-300">
-          <summary className="cursor-pointer font-semibold text-neutral-100">
-            Search stats
-          </summary>
-          <p className="mt-2 text-xs text-neutral-500">
-            Plain minimax, no pruning.
-          </p>
-
-          <label className="mt-4 grid gap-1 text-sm text-neutral-300">
-            <span className="flex items-center justify-between gap-3">
-              <span>Search depth</span>
-              <span className="font-mono text-neutral-100">{searchDepth}</span>
-            </span>
-            <input
-              type="range"
-              min="1"
-              max="3"
-              step="1"
-              value={searchDepth}
-              onChange={(event) => {
-                const value = Number(event.target.value);
-                setSearchDepth(Math.min(3, Math.max(1, value || 1)));
-              }}
-              disabled={opponent === "human"}
-              className="w-full accent-neutral-300 disabled:opacity-50"
-            />
-          </label>
-
-          <div className="mt-4 grid gap-4 lg:grid-cols-2">
-            <div className="space-y-2 text-neutral-400">
-              <p className="font-semibold text-neutral-200">Last agent search</p>
-              <p>{`\\(b_{root}=${lastSearchStats?.root_branching_factor ?? 0}\\)`}</p>
-              <p>
-                {`\\(\\bar{b}=${formatNumber(lastSearchStats?.average_branching_factor ?? 0)}\\)`}
-              </p>
-              <p>{`\\(N_{generated}=${lastSearchStats?.nodes_generated ?? 0}\\)`}</p>
-              <p>{`\\(N_{expanded}=${lastSearchStats?.expanded_nodes ?? 0}\\)`}</p>
-            </div>
-
-            <div className="space-y-2 text-neutral-300">
-              <p className="font-semibold text-neutral-200">Game totals</p>
-              <p>{`\\(A_{moves}=${gameTotals.agentMoves}\\)`}</p>
-              <p>{`\\(N_{generated,total}=${gameTotals.nodesGenerated}\\)`}</p>
-              <p>{`\\(N_{expanded,total}=${gameTotals.nodesExpanded}\\)`}</p>
-            </div>
-          </div>
-        </details>
-
-        <details className="mt-5 border-t border-neutral-800 pt-4 text-sm text-neutral-300">
-          <summary className="cursor-pointer font-semibold text-neutral-100">
-            Heuristics
-          </summary>
-
-          <div className="mt-3 overflow-x-auto text-neutral-300">
-            <p>{heuristicFormula}</p>
-          </div>
-
-          <div className="mt-4">
-            <p className="font-semibold text-neutral-200">h1: Mobility</p>
-            <p>{`\\[h_1(s)=M_{agent}(s)-M_{opp}(s)\\]`}</p>
-            <label className="mt-2 grid gap-1 text-sm text-neutral-300">
-              <span className="flex items-center justify-between gap-3">
-                <span>Mobility weight</span>
-                <span className="font-mono text-neutral-100">
-                  {formatNumber(mobilityWeight)}
-                </span>
-              </span>
-              <input
-                type="range"
-                min="-10"
-                max="10"
-                step="0.1"
-                value={mobilityWeight}
-                onChange={(event) => setMobilityWeight(Number(event.target.value))}
-                className="w-full accent-neutral-300"
-              />
-            </label>
-          </div>
-
-          <div className="mt-5">
-            <p className="font-semibold text-neutral-200">h2: Piece count</p>
-            <p>{`\\[h_2(s)=P_{agent}(s)-P_{opp}(s)\\]`}</p>
-            <label className="mt-2 grid gap-1 text-sm text-neutral-300">
-              <span className="flex items-center justify-between gap-3">
-                <span>Piece-count weight</span>
-                <span className="font-mono text-neutral-100">
-                  {formatNumber(pieceWeight)}
-                </span>
-              </span>
-              <input
-                type="range"
-                min="-10"
-                max="10"
-                step="0.1"
-                value={pieceWeight}
-                onChange={(event) => setPieceWeight(Number(event.target.value))}
-                className="w-full accent-neutral-300"
-              />
-            </label>
-          </div>
-
-          <div className="mt-5">
-            <p className="font-semibold text-neutral-200">h3: Material</p>
-            <p>{`\\[h_3(s)=V_{agent}(s)-V_{opp}(s)\\]`}</p>
-            <p className="text-xs text-neutral-500">
-              Pawn 1, knight 3, bishop 3, rook 5, queen 9, king 0.
-            </p>
-            <label className="mt-2 grid gap-1 text-sm text-neutral-300">
-              <span className="flex items-center justify-between gap-3">
-                <span>Material weight</span>
-                <span className="font-mono text-neutral-100">
-                  {formatNumber(materialWeight)}
-                </span>
-              </span>
-              <input
-                type="range"
-                min="-10"
-                max="10"
-                step="0.1"
-                value={materialWeight}
-                onChange={(event) => setMaterialWeight(Number(event.target.value))}
-                className="w-full accent-neutral-300"
-              />
-            </label>
-          </div>
-
-          <div className="mt-5">
-            <p className="font-semibold text-neutral-200">h4: Center control</p>
-            <p>{`\\[h_4(s)=C_{agent}(s)-C_{opp}(s)\\]`}</p>
-            <p className="text-xs text-neutral-500">
-              Counts occupying or attacking d4, e4, d5, and e5.
-            </p>
-            <label className="mt-2 grid gap-1 text-sm text-neutral-300">
-              <span className="flex items-center justify-between gap-3">
-                <span>Center-control weight</span>
-                <span className="font-mono text-neutral-100">
-                  {formatNumber(centerWeight)}
-                </span>
-              </span>
-              <input
-                type="range"
-                min="-10"
-                max="10"
-                step="0.1"
-                value={centerWeight}
-                onChange={(event) => setCenterWeight(Number(event.target.value))}
-                className="w-full accent-neutral-300"
-              />
-            </label>
-          </div>
-        </details>
+      <div className="mt-3">
+        <AgentControlsPanel
+          game={game}
+          gameTotals={gameTotals}
+          opponent={opponent}
+          settingsLocked={Boolean(sessionId)}
+          searchDepth={searchDepth}
+          setSearchDepth={setSearchDepth}
+          mobilityWeight={mobilityWeight}
+          pieceWeight={pieceWeight}
+          materialWeight={materialWeight}
+          centerWeight={centerWeight}
+          setMobilityWeight={setMobilityWeight}
+          setPieceWeight={setPieceWeight}
+          setMaterialWeight={setMaterialWeight}
+          setCenterWeight={setCenterWeight}
+        />
       </div>
     </div>
   );

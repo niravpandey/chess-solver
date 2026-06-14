@@ -45,7 +45,7 @@ export default function Square({
           }
         }}
         className={`
-            w-16 h-16
+            size-12 sm:size-14
             relative
             flex items-center justify-center
             select-none
@@ -70,7 +70,7 @@ export default function Square({
             <FontAwesomeIcon
               icon={pieceIcons[piece.type]}
               className={`
-                  block size-14 overflow-visible
+                  block size-10 sm:size-12 overflow-visible
                   ${piece.color === "white"
                   ? "text-white"
                   : "text-black"}

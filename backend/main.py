@@ -56,6 +56,36 @@ def parse_square(square: str) -> int:
         raise HTTPException(status_code=400, detail=f"Invalid square: {square}") from exc
 
 
+def outcome_reason(termination: chess.Termination) -> str:
+    reasons = {
+        chess.Termination.CHECKMATE: "checkmate",
+        chess.Termination.STALEMATE: "stalemate",
+        chess.Termination.INSUFFICIENT_MATERIAL: "insufficient_material",
+        chess.Termination.SEVENTYFIVE_MOVES: "seventyfive_move_rule",
+        chess.Termination.FIVEFOLD_REPETITION: "fivefold_repetition",
+        chess.Termination.FIFTY_MOVES: "fifty_move_claim",
+        chess.Termination.THREEFOLD_REPETITION: "threefold_claim",
+        chess.Termination.VARIANT_WIN: "variant_win",
+        chess.Termination.VARIANT_LOSS: "variant_loss",
+        chess.Termination.VARIANT_DRAW: "variant_draw",
+    }
+
+    return reasons[termination]
+
+
+def outcome_payload(board: chess.Board) -> dict | None:
+    outcome = board.outcome(claim_draw=True)
+
+    if outcome is None:
+        return None
+
+    return {
+        "winner": color_name(outcome.winner) if outcome.winner is not None else None,
+        "result": outcome.result(),
+        "reason": outcome_reason(outcome.termination),
+    }
+
+
 def board_payload(board: chess.Board) -> dict:
     return {
         "fen": board.fen(),
@@ -63,6 +93,8 @@ def board_payload(board: chess.Board) -> dict:
         "is_check": board.is_check(),
         "is_checkmate": board.is_checkmate(),
         "is_stalemate": board.is_stalemate(),
+        "is_game_over": board.is_game_over(claim_draw=True),
+        "outcome": outcome_payload(board),
         "legal_move_count": board.legal_moves.count(),
     }
 
@@ -126,8 +158,12 @@ def evaluate_position(
     material_score = material_score_for(board, color) - material_score_for(board, opponent)
     center_score = center_control_for(board, color) - center_control_for(board, opponent)
 
-    if board.is_checkmate():
-        return -100000.0 if board.turn == color else 100000.0
+    outcome = board.outcome(claim_draw=True)
+    if outcome is not None:
+        if outcome.winner is None:
+            return 0.0
+
+        return 100000.0 if outcome.winner == color else -100000.0
 
     return (
         mobility_weight * mobility_score
@@ -178,7 +214,7 @@ def estimate_search_stats(board: chess.Board, search_depth: int) -> dict:
         next_frontier = []
 
         for position in frontier:
-            if position.is_game_over():
+            if position.is_game_over(claim_draw=True):
                 continue
 
             moves = list(position.legal_moves)
@@ -219,7 +255,7 @@ def minimax(
 ) -> float:
     stats["nodes_generated"] += 1
 
-    if depth == 0 or board.is_game_over():
+    if depth == 0 or board.is_game_over(claim_draw=True):
         return evaluate_position(
             board,
             agent_color,
@@ -336,7 +372,7 @@ def make_move(request: MoveRequest):
 def minimax_agent_move(request: AgentMoveRequest):
     board = load_board(request.fen)
 
-    if board.is_game_over():
+    if board.is_game_over(claim_draw=True):
         raise HTTPException(status_code=400, detail="Game is already over")
 
     agent_color = board.turn
