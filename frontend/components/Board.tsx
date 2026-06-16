@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AgentControlsPanel from "./AgentControlsPanel";
 import AgentStatsTable from "./AgentStatsTable";
 import GameSidePanel from "./GameSidePanel";
+import PromotionPicker, { PromotionChoice } from "./PromotionPicker";
 import Square from "./Square";
 import { Piece, PieceType } from "./Piece";
 import { useChessSessionPersistence } from "@/hooks/useChessSessionPersistence";
@@ -35,6 +36,12 @@ const pieceTypes: Record<string, PieceType> = {
 
 type BoardProps = {
   apiUrl: string;
+};
+
+type PendingPromotion = {
+  fromSquare: string;
+  toSquare: string;
+  color: "white" | "black";
 };
 
 function squareName(rowIndex: number, colIndex: number) {
@@ -187,6 +194,8 @@ export default function Board({ apiUrl }: BoardProps) {
   });
   const [activeSquare, setActiveSquare] = useState<string | null>(null);
   const [legalMoves, setLegalMoves] = useState<LegalMove[]>([]);
+  const [pendingPromotion, setPendingPromotion] =
+    useState<PendingPromotion | null>(null);
   const [opponent, setOpponent] = useState<Opponent>("minimax");
   const [searchDepth, setSearchDepth] = useState(1);
   const [mobilityWeight, setMobilityWeight] = useState(1);
@@ -291,6 +300,7 @@ export default function Board({ apiUrl }: BoardProps) {
     completeSession(summary);
     setActiveSquare(null);
     setLegalMoves([]);
+    setPendingPromotion(null);
     setGame((current) => ({
       ...current,
       is_game_over: true,
@@ -325,6 +335,7 @@ export default function Board({ apiUrl }: BoardProps) {
   async function startGame() {
     setActiveSquare(null);
     setLegalMoves([]);
+    setPendingPromotion(null);
 
     try {
       await startSession({
@@ -444,6 +455,7 @@ export default function Board({ apiUrl }: BoardProps) {
     setIsAgentThinking(true);
     setActiveSquare(null);
     setLegalMoves([]);
+    setPendingPromotion(null);
     setStatus("Agent is thinking");
     const fenBefore = game.fen;
     const plyBefore = gamePly;
@@ -499,8 +511,8 @@ export default function Board({ apiUrl }: BoardProps) {
             search_depth_reached: nextGame.agent.search_depth,
             nodes_generated: nextGame.agent.nodes_generated,
             nodes_evaluated: nextGame.agent.expanded_nodes,
-            branches_pruned: 0,
-            pruning_rate: 0,
+            branches_pruned: nextGame.agent.branches_pruned,
+            pruning_rate: nextGame.agent.pruning_rate,
             search_time_ms: searchTimeMs,
             nodes_per_second: nodesPerSecond,
             selected_move: nextGame.move?.uci ?? "",
@@ -569,6 +581,60 @@ export default function Board({ apiUrl }: BoardProps) {
     sessionId,
   ]);
 
+  async function submitHumanMove(
+    fromSquare: string,
+    toSquare: string,
+    promotion?: PromotionChoice,
+  ) {
+    const fenBefore = game.fen;
+    const plyBefore = gamePly;
+    const evalBefore = evalHistory.at(-1)?.advantage ?? null;
+
+    try {
+      const nextGame = await postJson<GameState>(apiUrl, "/game/move", {
+        fen: fenBefore,
+        from_square: fromSquare,
+        to_square: toSquare,
+        ...(promotion ? { promotion } : {}),
+      });
+      const evalAfter = evalHistory.at(-1)?.advantage ?? null;
+      const moveData: ChessMoveRecord = {
+        ply_number: plyBefore + 1,
+        move_number: moveNumberFromPly(plyBefore),
+        actor: "human",
+        fen_before: fenBefore,
+        fen_after: nextGame.fen,
+        move_uci: nextGame.move?.uci ?? `${fromSquare}${toSquare}`,
+        move_san: nextGame.move?.san ?? `${fromSquare}-${toSquare}`,
+        legal_moves_count: game.legal_move_count,
+        eval_before: evalBefore,
+        eval_after: evalAfter,
+        eval_delta:
+          evalBefore !== null && evalAfter !== null
+            ? evalAfter - evalBefore
+            : null,
+        move_time_ms: null,
+        created_at: new Date().toISOString(),
+      };
+      const nextMoveCount = persistedMoveCount + 1;
+      setGame(nextGame);
+      setActiveSquare(null);
+      setLegalMoves([]);
+      setPendingPromotion(null);
+      if (resultForGame(nextGame)) {
+        void persistMove(moveData).finally(() =>
+          completeSessionForGameResult(nextGame, nextMoveCount, evalAfter),
+        );
+      } else {
+        void persistMove(moveData);
+      }
+      setStatus(gameStatus(nextGame, nextGame.move?.san));
+    } catch (error) {
+      console.error(error);
+      setStatus("Illegal move");
+    }
+  }
+
   async function selectSquare(square: string, piece: Piece | null) {
     if (!sessionId) {
       setStatus("Click Start Game to play");
@@ -585,57 +651,28 @@ export default function Board({ apiUrl }: BoardProps) {
     }
 
     if (activeSquare && legalTargets.has(square)) {
-      const fenBefore = game.fen;
-      const plyBefore = gamePly;
-      const evalBefore = evalHistory.at(-1)?.advantage ?? null;
+      const promotionMoves = legalMoves.filter(
+        (move) => move.to_square === square && move.promotion,
+      );
 
-      try {
-        const nextGame = await postJson<GameState>(apiUrl, "/game/move", {
-          fen: fenBefore,
-          from_square: activeSquare,
-          to_square: square,
+      if (promotionMoves.length) {
+        setPendingPromotion({
+          fromSquare: activeSquare,
+          toSquare: square,
+          color: game.turn,
         });
-        const evalAfter = evalHistory.at(-1)?.advantage ?? null;
-        const moveData: ChessMoveRecord = {
-          ply_number: plyBefore + 1,
-          move_number: moveNumberFromPly(plyBefore),
-          actor: "human",
-          fen_before: fenBefore,
-          fen_after: nextGame.fen,
-          move_uci: nextGame.move?.uci ?? `${activeSquare}${square}`,
-          move_san: nextGame.move?.san ?? `${activeSquare}-${square}`,
-          legal_moves_count: game.legal_move_count,
-          eval_before: evalBefore,
-          eval_after: evalAfter,
-          eval_delta:
-            evalBefore !== null && evalAfter !== null
-              ? evalAfter - evalBefore
-              : null,
-          move_time_ms: null,
-          created_at: new Date().toISOString(),
-        };
-        const nextMoveCount = persistedMoveCount + 1;
-        setGame(nextGame);
-        setActiveSquare(null);
-        setLegalMoves([]);
-        if (resultForGame(nextGame)) {
-          void persistMove(moveData).finally(() =>
-            completeSessionForGameResult(nextGame, nextMoveCount, evalAfter),
-          );
-        } else {
-          void persistMove(moveData);
-        }
-        setStatus(gameStatus(nextGame, nextGame.move?.san));
-      } catch (error) {
-        console.error(error);
-        setStatus("Illegal move");
+        setStatus("Choose a promotion piece");
+        return;
       }
+
+      await submitHumanMove(activeSquare, square);
       return;
     }
 
     if (!piece || piece.color !== game.turn) {
       setActiveSquare(null);
       setLegalMoves([]);
+      setPendingPromotion(null);
       return;
     }
 
@@ -650,6 +687,7 @@ export default function Board({ apiUrl }: BoardProps) {
       );
       setActiveSquare(square);
       setLegalMoves(response.moves);
+      setPendingPromotion(null);
       setStatus(
         response.moves.length
           ? `${piece.color === "white" ? "White" : "Black"} ${piece.type}: ${response.moves.length} legal moves`
@@ -664,7 +702,7 @@ export default function Board({ apiUrl }: BoardProps) {
   return (
     <div className="w-fit">
       <div className="flex flex-col items-start gap-3 xl:flex-row">
-        <div className="shrink-0 bg-neutral-900 shadow-xl border border-neutral-800">
+        <div className="relative shrink-0 bg-neutral-900 shadow-xl border border-neutral-800">
           <div className="inline-block border-2 border-black">
             {board.map((row, rowIndex) => (
               <div key={rowIndex} className="flex">
@@ -689,6 +727,22 @@ export default function Board({ apiUrl }: BoardProps) {
               </div>
             ))}
           </div>
+          {pendingPromotion && (
+            <PromotionPicker
+              color={pendingPromotion.color}
+              onChoose={(choice) =>
+                void submitHumanMove(
+                  pendingPromotion.fromSquare,
+                  pendingPromotion.toSquare,
+                  choice,
+                )
+              }
+              onCancel={() => {
+                setPendingPromotion(null);
+                setStatus(gameStatus(game));
+              }}
+            />
+          )}
         </div>
 
         <div className="flex w-full flex-col gap-3 sm:flex-row xl:w-auto">

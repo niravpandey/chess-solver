@@ -7,6 +7,10 @@ type LastSearchStats = {
   average_branching_factor: number;
   nodes_generated: number;
   expanded_nodes: number;
+  branches_pruned: number;
+  pruning_rate: number;
+  transposition_hits: number;
+  transposition_table_size: number;
 } | null;
 
 type SearchStatsPanelProps = {
@@ -38,8 +42,13 @@ export default function SearchStatsPanel({
         average_branching_factor: game.agent.average_branching_factor,
         nodes_generated: game.agent.nodes_generated,
         expanded_nodes: game.agent.expanded_nodes,
+        branches_pruned: game.agent.branches_pruned,
+        pruning_rate: game.agent.pruning_rate,
+        transposition_hits: game.agent.transposition_hits,
+        transposition_table_size: game.agent.transposition_table_size,
       }
     : null;
+  const pruningPercent = Math.round((lastSearchStats?.pruning_rate ?? 0) * 100);
 
   return (
     <details
@@ -50,7 +59,7 @@ export default function SearchStatsPanel({
         Search stats
       </summary>
       <p className="mt-1 text-xs text-neutral-500">
-        Plain minimax, no pruning.
+        Alpha-beta minimax with deterministic move ordering.
       </p>
 
       <label className="mt-2 grid gap-1 text-sm text-neutral-300">
@@ -61,12 +70,12 @@ export default function SearchStatsPanel({
         <input
           type="range"
           min="1"
-          max="3"
+          max="5"
           step="1"
           value={searchDepth}
           onChange={(event) => {
             const value = Number(event.target.value);
-            setSearchDepth(Math.min(3, Math.max(1, value || 1)));
+            setSearchDepth(Math.min(5, Math.max(1, value || 1)));
           }}
           disabled={opponent === "human" || settingsLocked}
           className="w-full accent-neutral-300 disabled:opacity-50"
@@ -82,6 +91,10 @@ export default function SearchStatsPanel({
           </p>
           <p>{`\\(N_{generated}=${lastSearchStats?.nodes_generated ?? 0}\\)`}</p>
           <p>{`\\(N_{expanded}=${lastSearchStats?.expanded_nodes ?? 0}\\)`}</p>
+          <p>{`\\(B_{pruned}=${lastSearchStats?.branches_pruned ?? 0}\\)`}</p>
+          <p>{`\\(r_{prune}=${pruningPercent}\\%\\)`}</p>
+          <p>{`\\(T_{hits}=${lastSearchStats?.transposition_hits ?? 0}\\)`}</p>
+          <p>{`\\(T_{size}=${lastSearchStats?.transposition_table_size ?? 0}\\)`}</p>
         </div>
 
         <div className="space-y-1 text-neutral-300">

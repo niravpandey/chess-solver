@@ -36,6 +36,10 @@ export type GameState = {
     average_branching_factor: number;
     nodes_generated: number;
     expanded_nodes: number;
+    branches_pruned: number;
+    pruning_rate: number;
+    transposition_hits: number;
+    transposition_table_size: number;
   };
 };
 
@@ -65,6 +69,8 @@ export type SearchStats = {
   average_branching_factor: number;
   nodes_generated: number;
   expanded_nodes: number;
+  branches_pruned: number;
+  pruning_rate: number;
   nodes_by_ply: number[];
   heuristics: {
     agent: HeuristicEval;
